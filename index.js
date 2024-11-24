@@ -556,22 +556,25 @@ async function displayCharactersInListViewPopup() {
         
         if (bottomOffset < threshold) {
             isLoading = true;
-            currentPage++;
             
-            // Cache DOM queries
+            // Get current search parameters
             const searchParams = {
                 searchTerm: document.getElementById('characterSearchInput').value,
-                includeTags: document.getElementById('includeTags').value.split(',').filter(Boolean).map(t => t.trim()),
-                excludeTags: document.getElementById('excludeTags').value.split(',').filter(Boolean).map(t => t.trim()),
+                includeTags: document.getElementById('includeTags').value.split(',').filter(tag => tag.length > 0).map(t => t.trim()),
+                excludeTags: document.getElementById('excludeTags').value.split(',').filter(tag => tag.length > 0).map(t => t.trim()),
                 nsfw: document.getElementById('nsfwCheckbox').checked,
                 sort: document.getElementById('sortOrder').value,
-                page: currentPage
+                page: currentPage + 1
             };
 
+            // Update current page after creating search params
+            currentPage = searchParams.page;
+
             executeCharacterSearch(searchParams, true)
+                .catch(error => console.error('Infinite scroll error:', error))
                 .finally(() => isLoading = false);
         }
-    }, 25); // Reduced debounce time
+    }, 25);
 
     characterListContainer.addEventListener('scroll', scrollHandler);
 
