@@ -1,3 +1,4 @@
+// An extension that allows you to import characters from CHub.
 // TODO: allow multiple characters to be imported at once
 import {
     getRequestHeaders,
@@ -23,13 +24,18 @@ let chubCharacters = [];
 let characterListContainer = null;  // A global variable to hold the reference
 let popupState = null;
 let savedPopupContent = null;
-const CACHE_DURATION = {
-    'last_activity_at': 1 * 60 * 1000,    // 1 minute for recent/latest
-    'trending_downloads': 5 * 60 * 1000,   // 5 minutes for trending
-    'default': 30 * 60 * 1000             // 30 minutes for other sorts
+let isLoading = false;
+let currentPage = 1;
+let hasMoreResults = true;
+
+const performance_monitoring = {
+    enabled: true,
+    log: function(action, timeStart) {
+        if (!this.enabled) return;
+        const timeEnd = performance.now();
+        console.log(`${action} took ${(timeEnd - timeStart).toFixed(2)}ms`);
+    }
 };
-const searchCache = new Map();
-let activeSearchController = null; // For request cancellation
 
 /**
  * Asynchronously loads settings from `extension_settings.chub`, 
@@ -103,11 +109,29 @@ async function downloadCharacter(input) {
 /**
  * Updates the character list in the view based on provided characters.
  * @param {Array} characters - A list of character data objects to be rendered in the view.
+ * @param {boolean} append - Whether to append the characters or replace existing ones.
  */
-function updateCharacterListInView(characters) {
-    if (characterListContainer) {
-        characterListContainer.innerHTML = characters.map(generateCharacterListItem).join('');
+function updateCharacterListInView(characters, append = false) {
+    if (!characterListContainer) return;
+
+    // Use DocumentFragment for better performance
+    const fragment = document.createDocumentFragment();
+    
+    // Create template element once
+    const template = document.createElement('template');
+    
+    // Process all characters at once
+    const html = characters.map((character, i) => 
+        generateCharacterListItem(character, i)
+    ).join('');
+    
+    template.innerHTML = html;
+    fragment.appendChild(template.content);
+
+    if (!append) {
+        characterListContainer.innerHTML = '';
     }
+    characterListContainer.appendChild(fragment);
 }
 
 /**
@@ -142,100 +166,53 @@ function makeTagPermutations(tags) {
  * @returns {Promise<Array>} - Resolves with an array of character objects that match the search criteria.
  */
 async function fetchCharactersBySearch({ searchTerm, includeTags, excludeTags, nsfw, sort, page=1 }) {
-    if (activeSearchController) {
-        activeSearchController.abort();
-    }
-    activeSearchController = new AbortController();
-
-    const cacheKey = JSON.stringify({ searchTerm, includeTags, excludeTags, nsfw, sort, page });
+    const timeStart = performance.now();
     
-    // Check cache with expiration
-    const cachedResult = getCacheEntry(cacheKey, sort);
-    if (cachedResult) {
-        console.log('Using cached results');
-        return cachedResult;
-    }
-
     let first = extension_settings.chub.findCount;
     let asc = false;
     let include_forks = true;
-    nsfw = nsfw || extension_settings.chub.nsfw;
+    nsfw = nsfw || extension_settings.chub.nsfw;  // Default to extension settings if not provided
     let require_images = false;
     let require_custom_prompt = false;
     searchTerm = searchTerm ? `search=${encodeURIComponent(searchTerm)}&` : '';
     sort = sort || 'download_count';
 
-    const url = `${API_ENDPOINT_SEARCH}?${searchTerm}first=${first}&page=${page}&sort=${sort}&asc=${asc}&venus=true&include_forks=${include_forks}&nsfw=${nsfw}&require_images=${require_images}&require_custom_prompt=${require_custom_prompt}`;
+    // Construct the URL with the search parameters, if any
+    // 
+    let url = `${API_ENDPOINT_SEARCH}?${searchTerm}first=${first}&page=${page}&sort=${sort}&asc=${asc}&venus=true&include_forks=${include_forks}&nsfw=${nsfw}&require_images=${require_images}&require_custom_prompt=${require_custom_prompt}`;
 
-    try {
-        includeTags = includeTags.filter(tag => tag.length > 0);
-        if (includeTags.length > 0) {
-            url += `&tags=${encodeURIComponent(includeTags.join(',').slice(0, 100))}`;
-        }
-
-        excludeTags = excludeTags.filter(tag => tag.length > 0);
-        if (excludeTags.length > 0) {
-            url += `&exclude_tags=${encodeURIComponent(excludeTags.join(',').slice(0, 100))}`;
-        }
-
-        const searchResponse = await fetch(url, { signal: activeSearchController.signal });
-        const searchData = await searchResponse.json();
-
-        // Clear previous search results
-        chubCharacters = [];
-
-        if (searchData.nodes.length === 0) {
-            return chubCharacters;
-        }
-
-        // Load characters in batches of 5
-        const batchSize = 5;
-        for (let i = 0; i < searchData.nodes.length; i += batchSize) {
-            const batch = searchData.nodes.slice(i, i + batchSize);
-            const batchPromises = batch.map(node => getCharacter(node.fullPath));
-            const batchBlobs = await Promise.all(batchPromises);
-
-            batchBlobs.forEach((character, index) => {
-                const nodeIndex = i + index;
-                const imageUrl = URL.createObjectURL(character);
-                chubCharacters.push({
-                    url: imageUrl,
-                    description: searchData.nodes[nodeIndex].tagline || "Description here...",
-                    name: searchData.nodes[nodeIndex].name,
-                    fullPath: searchData.nodes[nodeIndex].fullPath,
-                    tags: searchData.nodes[nodeIndex].topics,
-                    author: searchData.nodes[nodeIndex].fullPath.split('/')[0],
-                });
-            });
-
-            // Update the view after each batch
-            if (characterListContainer) {
-                updateCharacterListInView(chubCharacters);
-            }
-        }
-
-        // Modified cache storage
-        searchCache.set(cacheKey, {
-            data: chubCharacters,
-            timestamp: Date.now()
-        });
-
-        // Maintain cache size
-        if (searchCache.size > 50) {
-            const firstKey = searchCache.keys().next().value;
-            searchCache.delete(firstKey);
-        }
-
-        return chubCharacters;
-    } catch (error) {
-        if (error.name === 'AbortError') {
-            console.log('Search request cancelled');
-            return [];
-        }
-        console.error('Search failed:', error);
-        throw error;
+    //truncate include and exclude tags to 100 characters
+    includeTags = includeTags.filter(tag => tag.length > 0);
+    if (includeTags && includeTags.length > 0) {
+        //includeTags = makeTagPermutations(includeTags);
+        includeTags = includeTags.join(',').slice(0, 100);
+        url += `&tags=${encodeURIComponent(includeTags)}`;
     }
+    //remove tags that contain no characters
+    excludeTags = excludeTags.filter(tag => tag.length > 0);
+    if (excludeTags && excludeTags.length > 0) {
+        //excludeTags = makeTagPermutations(excludeTags);
+        excludeTags = excludeTags.join(',').slice(0, 100);
+        url += `&exclude_tags=${encodeURIComponent(excludeTags)}`;
+    }
+
+    let searchResponse = await fetch(url);
+    let searchData = await searchResponse.json();
+
+    // Clear previous search results
+    chubCharacters = [];
+
+    if (searchData.nodes.length === 0) {
+        return chubCharacters;
+    }
+
+    // Use new batch processing
+    chubCharacters = await processCharacters(searchData.nodes);
+    
+    performance_monitoring.log('Character fetch and processing', timeStart);
+    return chubCharacters;
 }
+
 /**
  * Searches for characters based on the provided options and manages the UI during the search.
  * @param {Object} options - The search criteria/options for fetching characters.
@@ -271,30 +248,44 @@ function openSearchPopup() {
  * @param {Object} options - The search criteria/options for fetching characters.
  * @returns {Promise<void>} - Resolves once the character list has been updated in the view.
  */
-async function executeCharacterSearch(options) {
-    let characters  = []
-    characters = await searchCharacters(options);
+async function executeCharacterSearch(options, append = false) {
+    if (!append) {
+        currentPage = 1;
+        hasMoreResults = true;
+    }
+
+    if (!hasMoreResults) return;
+
+    let characters = await searchCharacters({ ...options, page: currentPage });
 
     if (characters && characters.length > 0) {
         console.log('Updating character list');
-        updateCharacterListInView(characters);
+        updateCharacterListInView(characters, append);
+        hasMoreResults = characters.length === extension_settings.chub.findCount;
     } else {
         console.log('No characters found');
-        characterListContainer.innerHTML = '<div class="no-characters-found">No characters found</div>';
+        if (!append) {
+            characterListContainer.innerHTML = '<div class="no-characters-found">No characters found</div>';
+        }
+        hasMoreResults = false;
     }
+    
+    isLoading = false;
 }
 
 
 /**
  * Generates the HTML structure for a character list item.
- * @param {Object} character - The character data object with properties like url, name, description, tags, and author.
+ * @param {Object} character - The character data object.
  * @param {number} index - The index of the character in the list.
- * @returns {string} - Returns an HTML string representation of the character list item.
+ * @returns {string} - Returns an HTML string for the character item.
  */
 function generateCharacterListItem(character, index) {
     return `
         <div class="character-list-item" data-index="${index}">
-            <img class="thumbnail" src="${character.url}" loading="lazy" alt="${character.name}">
+            <img class="thumbnail lazy" 
+                src="${character.url}" 
+                alt="${character.name || 'Character Image'}" />
             <div class="info">
                 <a href="https://chub.ai/characters/${character.fullPath}" target="_blank">
                     <div class="name">${character.name || "Default Name"}</div>
@@ -302,12 +293,13 @@ function generateCharacterListItem(character, index) {
                 <a href="https://chub.ai/users/${character.author}" target="_blank">
                     <span class="author">by ${character.author}</span>
                 </a>
-                <div class="description">${character.description}</div>
-                <div class="tags">${character.tags.map(tag => `<span class="tag">${tag}</span>`).join('')}</div>
+                <div class="description">${character.description || ''}</div>
+                <div class="tags">${character.tags ? character.tags.map(tag => 
+                    `<span class="tag">${tag}</span>`).join('') : ''}</div>
             </div>
             <div data-path="${character.fullPath}" class="menu_button download-btn fa-solid fa-cloud-arrow-down faSmallFontSquareFix"></div>
         </div>
-    `;
+    `.trim();
 }
 
 // good ol' clamping
@@ -365,34 +357,44 @@ async function displayCharactersInListViewPopup() {
         <div class="character-list-popup">
             ${chubCharacters.map((character, index) => generateCharacterListItem(character, index)).join('')}
         </div>
-        <div class="search-controls">
+        <div id="loading-indicator" style="display: none; text-align: center; padding: 10px;">
+            Loading more characters...
+        </div>
+        <hr>
+        <div class="search-container">
+            <div class="flex-container flex-no-wrap flex-align-center">
+            <label for="characterSearchInput"><i class="fas fa-search"></i></label>
+            <input type="text" id="characterSearchInput" class="text_pole flex1" placeholder="Search CHUB for characters...">
+            </div>
+            <div class="flex-container flex-no-wrap flex-align-center">
+            <label for="includeTags"><i class="fas fa-plus-square"></i></label>
+            <input type="text" id="includeTags" class="text_pole flex1" placeholder="Include tags (comma separated)">
+            </div>
             <div class="flex-container">
-                <input type="text" id="characterSearchInput" placeholder="Search characters...">
+            <label for="excludeTags"><i class="fas fa-minus-square"></i></label>
+            <input type="text" id="excludeTags" class="text_pole flex1" placeholder="Exclude tags (comma separated)">
+            </div>
+            <div class="page-buttons flex-container flex-no-wrap flex-align-center">
                 <div class="flex-container flex-no-wrap flex-align-center">
-                    <label for="includeTags">Include Tags:</label>
-                    <input type="text" id="includeTags" placeholder="tag1, tag2, ...">
+                    <button class="menu_button" id="pageDownButton"><i class="fas fa-chevron-left"></i></button>
+                    <label for="pageNumber">Page:</label>
+                    <input type="number" id="pageNumber" class="text_pole textarea_compact wide10pMinFit" min="1" value="1">
+                    <button class="menu_button" id="pageUpButton"><i class="fas fa-chevron-right"></i></button>
                 </div>
                 <div class="flex-container flex-no-wrap flex-align-center">
-                    <label for="excludeTags">Exclude Tags:</label>
-                    <input type="text" id="excludeTags" placeholder="tag1, tag2, ...">
-                </div>
-                <div class="flex-container flex-no-wrap flex-align-center">
-                    <label for="sortOrder">Sort By:</label>
-                    <select id="sortOrder">
-                        ${Object.keys(readableOptions).map(key => `<option value="${key}">${readableOptions[key]}</option>`).join('')}
-                    </select>
+                <label for="sortOrder">Sort By:</label> <!-- This is the label for sorting -->
+                <select class="margin0" id="sortOrder">
+                ${Object.keys(readableOptions).map(key => `<option value="${key}">${readableOptions[key]}</option>`).join('')}
+                </select>
                 </div>
                 <div class="flex-container flex-no-wrap flex-align-center">
                     <label for="nsfwCheckbox">NSFW:</label>
                     <input type="checkbox" id="nsfwCheckbox">
                 </div>
-                <div class="flex-container">
-                    <div class="menu_button" id="clearCacheButton">
-                        <i class="fa-solid fa-broom"></i> Clear Cache
-                    </div>
-                </div>
                 <div class="menu_button" id="characterSearchButton">Search</div>
             </div>
+
+
         </div>
     </div>
 `;
@@ -449,6 +451,16 @@ async function displayCharactersInListViewPopup() {
         }
     });
 
+    const executeCharacterSearchDebounced = debounce((options) => {
+        if (!isLoading) {
+            isLoading = true;
+            executeCharacterSearch(options)
+                .finally(() => {
+                    isLoading = false;
+                });
+        }
+    }, 250); // Reduced from 300ms to 250ms
+
     // Combine the 'keydown' and 'click' event listeners for search functionality, debounce the inputs
     const handleSearch = async function (e) {
         console.log('handleSearch', e);
@@ -488,14 +500,19 @@ async function displayCharactersInListViewPopup() {
             document.getElementById('pageNumber').value = 1;
         }
         
-        executeCharacterSearchDebounced({
+        // Reset scroll state
+        currentPage = 1;
+        hasMoreResults = true;
+        isLoading = false;
+
+        executeCharacterSearch({
             searchTerm,
             includeTags,
             excludeTags,
             nsfw,
             sort,
-            page
-        });
+            page: currentPage
+        }, false);
     };
 
     // debounce the inputs
@@ -527,75 +544,56 @@ async function displayCharactersInListViewPopup() {
     }
     );
 
-    // Add infinite scroll setup
-    function setupInfiniteScroll() {
-        const observer = new IntersectionObserver((entries) => {
-            entries.forEach(entry => {
-                if (entry.isIntersecting) {
-                    const pageNumber = document.getElementById('pageNumber');
-                    pageNumber.value = parseInt(pageNumber.value) + 1;
-                    handleSearch({ target: { id: 'pageNumber' } });
-                }
-            });
-        }, { threshold: 0.5 });
+    // Add this after characterListContainer is defined
+    const scrollHandler = debounce(() => {
+        if (isLoading || !hasMoreResults) return;
 
-        // Add sentinel element for infinite scroll
-        const sentinel = document.createElement('div');
-        sentinel.className = 'scroll-sentinel';
-        characterListContainer.appendChild(sentinel);
-        observer.observe(sentinel);
-    }
+        const container = characterListContainer;
+        const threshold = 200;
+        
+        // Use more efficient calculation with cached values
+        const bottomOffset = container.scrollHeight - (container.scrollTop + container.clientHeight);
+        
+        if (bottomOffset < threshold) {
+            isLoading = true;
+            currentPage++;
+            
+            // Cache DOM queries
+            const searchParams = {
+                searchTerm: document.getElementById('characterSearchInput').value,
+                includeTags: document.getElementById('includeTags').value.split(',').filter(Boolean).map(t => t.trim()),
+                excludeTags: document.getElementById('excludeTags').value.split(',').filter(Boolean).map(t => t.trim()),
+                nsfw: document.getElementById('nsfwCheckbox').checked,
+                sort: document.getElementById('sortOrder').value,
+                page: currentPage
+            };
 
-    // Cleanup function
-    function cleanup() {
-        chubCharacters.forEach(character => {
-            URL.revokeObjectURL(character.url);
-        });
-        searchCache.clear();
-        chubCharacters = [];
-        if (activeSearchController) {
-            activeSearchController.abort();
+            executeCharacterSearch(searchParams, true)
+                .finally(() => isLoading = false);
         }
-    }
+    }, 25); // Reduced debounce time
 
-    // Add cleanup listener
-    document.getElementById('dialogue_popup_text').addEventListener('close', cleanup);
+    characterListContainer.addEventListener('scroll', scrollHandler);
 
-    // Optimize search handling
-    const searchDebounceTime = 750;
-    const tagDebounceTime = 500;
+    // Add some CSS for the loading indicator
+    const style = document.createElement('style');
+    style.textContent = `
+        .character-list-popup {
+            max-height: 70vh;
+            overflow-y: auto;
+            padding-right: 10px;
+        }
+        #loading-indicator {
+            padding: 10px;
+            text-align: center;
+            font-style: italic;
+            color: #888;
+        }
+    `;
+    document.head.appendChild(style);
 
-    const executeCharacterSearchDebounced = debounce(
-        (options) => executeCharacterSearch(options), 
-        searchDebounceTime
-    );
-
-    const handleTagSearchDebounced = debounce(
-        (options) => executeCharacterSearch(options), 
-        tagDebounceTime
-    );
-
-    // Update splitAndTrim function
-    const splitAndTrim = (str) => {
-        if (!str || !str.trim()) return [];
-        return str.includes(',') ? 
-            str.split(',').reduce((acc, tag) => {
-                const trimmed = tag.trim();
-                if (trimmed) acc.push(trimmed);
-                return acc;
-            }, []) :
-            [str.trim()];
-    };
-
-    // Initialize infinite scroll
-    setupInfiniteScroll();
-
-    // Add event listener for the clear cache button
-    document.getElementById('clearCacheButton').addEventListener('click', () => {
-        clearSearchCache();
-        // Optionally refresh the current search
-        handleSearch({ type: 'click' });
-    });
+    // Initialize lazy loading after the popup is created
+    observeImages();
 }
 
 /**
@@ -610,43 +608,37 @@ async function displayCharactersInListViewPopup() {
  * @param {string} fullPath - The unique path/reference for the character to be fetched.
  * @returns {Promise<Blob>} - Resolves with a Blob of the fetched character data.
  */
-async function getCharacter(fullPath, retries = 3) {
-    for (let i = 0; i < retries; i++) {
-        try {
-            let response = await fetch(
-                API_ENDPOINT_DOWNLOAD,
-                {
-                    method: "POST",
-                    headers: {
-                        'Content-Type': 'application/json'
-                    },
-                    body: JSON.stringify({
-                        fullPath: fullPath,
-                        format: "tavern",
-                        version: "main"
-                    }),
-                }
-            );
-
-            if (!response.ok) {
-                console.log(`Request failed for ${fullPath}, trying backup endpoint`);
-                response = await fetch(
-                    `https://avatars.charhub.io/avatars/${fullPath}/avatar.webp`,
-                    {
-                        method: "GET",
-                        headers: {
-                            'Content-Type': 'application/json'
-                        },
-                    }
-                );
-            }
-
-            return await response.blob();
-        } catch (error) {
-            if (i === retries - 1) throw error;
-            await delay(1000 * (i + 1)); // Exponential backoff
+async function getCharacter(fullPath) {
+    let response = await fetch(
+        API_ENDPOINT_DOWNLOAD,
+        {
+            method: "POST",
+            headers: {
+                'Content-Type': 'application/json'
+            },
+            body: JSON.stringify({
+                fullPath: fullPath,
+                format: "tavern",
+                version: "main"
+            }),
         }
+    );
+
+    // If the request failed, try a backup endpoint - https://avatars.charhub.io/{fullPath}/avatar.webp
+    if (!response.ok) {
+        console.log(`Request failed for ${fullPath}, trying backup endpoint`);
+        response = await fetch(
+            `https://avatars.charhub.io/avatars/${fullPath}/avatar.webp`,
+            {
+                method: "GET",
+                headers: {
+                    'Content-Type': 'application/json'
+                },
+            }
+        );
     }
+    let data = await response.blob();
+    return data;
 }
 
 /**
@@ -666,30 +658,57 @@ jQuery(async () => {
     loadSettings();
 });
 
-function getCacheEntry(cacheKey, sort) {
-    if (!searchCache.has(cacheKey)) {
-        return null;
+// Add new optimization for batch processing
+const processCharacters = async (nodes) => {
+    const batchSize = 20; // Increased from 10
+    const batches = [];
+    for (let i = 0; i < nodes.length; i += batchSize) {
+        batches.push(nodes.slice(i, i + batchSize));
     }
 
-    const cacheEntry = searchCache.get(cacheKey);
-    const now = Date.now();
-    const maxAge = CACHE_DURATION[sort] || CACHE_DURATION.default;
-
-    // Check if cache entry has expired
-    if (now - cacheEntry.timestamp > maxAge) {
-        searchCache.delete(cacheKey);
-        return null;
+    const processedCharacters = [];
+    for (const batch of batches) {
+        const promises = batch.map(async (node) => {
+            const blob = await getCharacter(node.fullPath);
+            return {
+                url: URL.createObjectURL(blob),
+                description: node.tagline || "Description here...",
+                name: node.name,
+                fullPath: node.fullPath,
+                tags: node.topics,
+                author: node.fullPath.split('/')[0],
+            };
+        });
+        const results = await Promise.all(promises);
+        processedCharacters.push(...results);
+        
+        // Update UI after each batch
+        if (characterListContainer) {
+            updateCharacterListInView(processedCharacters, true);
+        }
     }
+    return processedCharacters;
+};
 
-    return cacheEntry.data;
-}
+// Simplified lazy loading implementation
+const observeImages = () => {
+    const imageObserver = new IntersectionObserver((entries) => {
+        entries.forEach(entry => {
+            if (entry.isIntersecting) {
+                const img = entry.target;
+                if (img.classList.contains('lazy')) {
+                    img.classList.remove('lazy');
+                    imageObserver.unobserve(img);
+                }
+            }
+        });
+    }, {
+        rootMargin: '50px 0px',
+        threshold: 0.1
+    });
 
-// Add this function to handle cache clearing
-function clearSearchCache() {
-    searchCache.clear();
-    console.log('Search cache cleared');
-    // Optional: Show a notification to the user
-    toastr.success('Search cache cleared');
-}
-
+    document.querySelectorAll('.thumbnail.lazy').forEach(img => {
+        imageObserver.observe(img);
+    });
+};
 
