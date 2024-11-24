@@ -1,0 +1,11 @@
+{
+    "display_name": "CHUB Search Modified",
+    "loading_order": 6,
+    "requires": [],
+    "optional": [],
+    "js": "index.js",
+    "css": "style.css",
+    "author": "City-Unit & realcoloride",
+    "homePage": "",
+    "version": "1.0.2"
+}
