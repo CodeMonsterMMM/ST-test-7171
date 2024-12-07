@@ -73,10 +73,27 @@ body img.thumbnail {
 
 .character-list-item .info .description {
     color: #666;  /* Darkens the description text slightly */
-    white-space: nowrap;
-    overflow: hidden;
-    text-overflow: ellipsis;  /* Ensures that long descriptions end in an ellipsis */
     text-align: left;  /* aligns content to the left */
+    max-height: 1.2em;
+    overflow: hidden;
+    transition: max-height 0.3s ease-out;
+}
+
+.character-list-item .info .description.expanded {
+    max-height: 1000px;  /* Large enough to show full content */
+    white-space: normal;
+}
+
+.description-toggle {
+    cursor: pointer;
+    color: #888;
+    font-size: 0.8em;
+    margin-top: 2px;
+    user-select: none;
+}
+
+.description-toggle:hover {
+    color: #666;
 }
 
 .character-list-item .info .tags{

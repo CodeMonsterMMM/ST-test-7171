@@ -294,6 +294,7 @@ function generateCharacterListItem(character, index) {
                     <span class="author">by ${character.author}</span>
                 </a>
                 <div class="description">${character.description || ''}</div>
+                <div class="description-toggle">Show More</div>
                 <div class="tags">${character.tags ? character.tags.map(tag => 
                     `<span class="tag">${tag}</span>`).join('') : ''}</div>
             </div>
@@ -433,6 +434,11 @@ async function displayCharactersInListViewPopup() {
 
             // Prevent this click event from reaching the document's click listener
             event.stopPropagation();
+        }
+        if (event.target.classList.contains('description-toggle')) {
+            const description = event.target.previousElementSibling;
+            description.classList.toggle('expanded');
+            event.target.textContent = description.classList.contains('expanded') ? 'Show Less' : 'Show More';
         }
     });
 
