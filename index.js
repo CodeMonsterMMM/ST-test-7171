@@ -294,7 +294,6 @@ function generateCharacterListItem(character, index) {
                     <span class="author">by ${character.author}</span>
                 </a>
                 <div class="description">${character.description || ''}</div>
-                <div class="description-toggle">Show More</div>
                 <div class="tags">${character.tags ? character.tags.map(tag => 
                     `<span class="tag">${tag}</span>`).join('') : ''}</div>
             </div>
@@ -392,6 +391,10 @@ async function displayCharactersInListViewPopup() {
                     <label for="nsfwCheckbox">NSFW:</label>
                     <input type="checkbox" id="nsfwCheckbox">
                 </div>
+                <div class="flex-container flex-no-wrap flex-align-center">
+                    <label for="showFullDescriptions">Show Full Descriptions:</label>
+                    <input type="checkbox" id="showFullDescriptions">
+                </div>
                 <div class="menu_button" id="characterSearchButton">Search</div>
             </div>
 
@@ -435,10 +438,11 @@ async function displayCharactersInListViewPopup() {
             // Prevent this click event from reaching the document's click listener
             event.stopPropagation();
         }
-        if (event.target.classList.contains('description-toggle')) {
-            const description = event.target.previousElementSibling;
-            description.classList.toggle('expanded');
-            event.target.textContent = description.classList.contains('expanded') ? 'Show Less' : 'Show More';
+    });
+
+    characterListContainer.addEventListener('click', function (event) {
+        if (event.target.classList.contains('description')) {
+            event.target.classList.toggle('expanded');
         }
     });
 
@@ -603,6 +607,16 @@ async function displayCharactersInListViewPopup() {
 
     // Initialize lazy loading after the popup is created
     observeImages();
+
+    // Add event handler for show full descriptions toggle
+    document.getElementById('showFullDescriptions').addEventListener('change', function(event) {
+        const wrapper = document.querySelector('.list-and-search-wrapper');
+        if (event.target.checked) {
+            wrapper.classList.add('show-full-descriptions');
+        } else {
+            wrapper.classList.remove('show-full-descriptions');
+        }
+    });
 }
 
 /**
