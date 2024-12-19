@@ -27,6 +27,9 @@ let savedPopupContent = null;
 let isLoading = false;
 let currentPage = 1;
 let hasMoreResults = true;
+let loadingPage = null; // Track which page is currently being loaded
+let lastLoadedPage = null; // Track the last loaded page
+let processedPages = new Set();
 
 const performance_monitoring = {
     enabled: true,
@@ -121,9 +124,14 @@ function updateCharacterListInView(characters, append = false) {
     const template = document.createElement('template');
     
     // Process all characters at once
-    const html = characters.map((character, i) => 
-        generateCharacterListItem(character, i)
-    ).join('');
+    const html = characters.map((character, i) => {
+        const existingItem = characterListContainer.querySelector(`[data-path="${character.fullPath}"]`);
+        if (existingItem && append) {
+            console.log(`Skipping duplicate character in view: ${character.name}`);
+            return '';
+        }
+        return generateCharacterListItem(character, i);
+    }).filter(html => html !== '').join('');
     
     template.innerHTML = html;
     fragment.appendChild(template.content);
@@ -131,7 +139,10 @@ function updateCharacterListInView(characters, append = false) {
     if (!append) {
         characterListContainer.innerHTML = '';
     }
-    characterListContainer.appendChild(fragment);
+    
+    if (fragment.children.length > 0) {
+        characterListContainer.appendChild(fragment);
+    }
 }
 
 /**
@@ -252,25 +263,52 @@ async function executeCharacterSearch(options, append = false) {
     if (!append) {
         currentPage = 1;
         hasMoreResults = true;
+        seenCharacters.clear();
+        lastLoadedPage = null;
+        loadingPage = null;
+        processedPages.clear();
     }
 
-    if (!hasMoreResults) return;
+    if (processedPages.has(options.page)) {
+        console.log(`Page ${options.page} already processed, skipping`);
+        return;
+    }
 
-    let characters = await searchCharacters({ ...options, page: currentPage });
+    if (!hasMoreResults) {
+        console.log('No more results to load');
+        return;
+    }
 
-    if (characters && characters.length > 0) {
-        console.log('Updating character list');
-        updateCharacterListInView(characters, append);
-        hasMoreResults = characters.length === extension_settings.chub.findCount;
-    } else {
-        console.log('No characters found');
-        if (!append) {
-            characterListContainer.innerHTML = '<div class="no-characters-found">No characters found</div>';
+    // Show loading indicator
+    const loadingIndicator = document.getElementById('loading-indicator');
+    if (loadingIndicator) {
+        loadingIndicator.style.display = 'block';
+    }
+
+    try {
+        let characters = await searchCharacters({ ...options, page: options.page || currentPage });
+
+        if (characters && characters.length > 0) {
+            console.log(`Loaded ${characters.length} characters for page ${options.page || currentPage}`);
+            updateCharacterListInView(characters, append);
+            hasMoreResults = characters.length === extension_settings.chub.findCount;
+            processedPages.add(options.page || currentPage);
+        } else {
+            console.log('No characters found');
+            if (!append) {
+                characterListContainer.innerHTML = '<div class="no-characters-found">No characters found</div>';
+            }
+            hasMoreResults = false;
         }
+    } catch (error) {
+        console.error('Error executing character search:', error);
         hasMoreResults = false;
+    } finally {
+        // Hide loading indicator
+        if (loadingIndicator) {
+            loadingIndicator.style.display = 'none';
+        }
     }
-    
-    isLoading = false;
 }
 
 
@@ -282,7 +320,7 @@ async function executeCharacterSearch(options, append = false) {
  */
 function generateCharacterListItem(character, index) {
     return `
-        <div class="character-list-item" data-index="${index}">
+        <div class="character-list-item" data-index="${index}" data-path="${character.fullPath}">
             <img class="thumbnail lazy" 
                 src="${character.url}" 
                 alt="${character.name || 'Character Image'}" />
@@ -479,14 +517,12 @@ async function displayCharactersInListViewPopup() {
         }
 
         const splitAndTrim = (str) => {
-            str = str.trim(); // Trim the entire string first
+            str = str.trim();
             if (!str.includes(',')) {
                 return [str];
             }
             return str.split(',').map(tag => tag.trim());
         };
-
-        console.log(document.getElementById('includeTags').value);
 
         const searchTerm = document.getElementById('characterSearchInput').value;
         const includeTags = splitAndTrim(document.getElementById('includeTags').value);
@@ -495,13 +531,17 @@ async function displayCharactersInListViewPopup() {
         const sort = document.getElementById('sortOrder').value;
         let page = document.getElementById('pageNumber').value;
 
-        // If the page number is not being changed, use page 1
+        // Reset pagination state for any search parameter change except page navigation
         if (e.target.id !== 'pageNumber' && e.target.id !== 'pageUpButton' && e.target.id !== 'pageDownButton') {
-            // this is frustrating
-            
-            // page = 1;
-            // set page box to 1
-            // document.getElementById('pageNumber').value = 1;
+            page = 1;
+            document.getElementById('pageNumber').value = 1;
+            currentPage = 1;
+            hasMoreResults = true;
+            seenCharacters.clear();
+            processedPages.clear();
+            lastLoadedPage = null;
+            loadingPage = null;
+            isLoading = false;
         }
 
         // if page below 0, set to 1
@@ -509,11 +549,6 @@ async function displayCharactersInListViewPopup() {
             page = 1;
             document.getElementById('pageNumber').value = 1;
         }
-        
-        // Reset scroll state
-        currentPage = 1;
-        hasMoreResults = true;
-        isLoading = false;
 
         executeCharacterSearch({
             searchTerm,
@@ -556,15 +591,29 @@ async function displayCharactersInListViewPopup() {
 
     // Add this after characterListContainer is defined
     const scrollHandler = debounce(() => {
-        if (isLoading || !hasMoreResults) return;
+        if (isLoading || !hasMoreResults) {
+            console.log('Skipping scroll handler - loading or no more results');
+            return;
+        }
 
         const container = characterListContainer;
         const threshold = 200;
         
-        // Use more efficient calculation with cached values
         const bottomOffset = container.scrollHeight - (container.scrollTop + container.clientHeight);
         
         if (bottomOffset < threshold) {
+            const nextPage = currentPage + 1;
+            
+            // Enhanced duplicate loading prevention
+            if (loadingPage === nextPage || 
+                lastLoadedPage === nextPage || 
+                processedPages.has(nextPage)) {
+                console.log(`Skipping page ${nextPage} - already processed or loading`);
+                return;
+            }
+
+            console.log(`Loading page ${nextPage}`);
+            loadingPage = nextPage;
             isLoading = true;
             
             // Get current search parameters
@@ -574,17 +623,35 @@ async function displayCharactersInListViewPopup() {
                 excludeTags: document.getElementById('excludeTags').value.split(',').filter(tag => tag.length > 0).map(t => t.trim()),
                 nsfw: document.getElementById('nsfwCheckbox').checked,
                 sort: document.getElementById('sortOrder').value,
-                page: currentPage + 1
+                page: nextPage
             };
 
-            // Update current page after creating search params
-            currentPage = searchParams.page;
+            // Update currentPage before the search
+            currentPage = nextPage;
 
+            // Execute the search with better state management
             executeCharacterSearch(searchParams, true)
-                .catch(error => console.error('Infinite scroll error:', error))
-                .finally(() => isLoading = false);
+                .then(() => {
+                    lastLoadedPage = nextPage;
+                    console.log(`Successfully loaded page ${nextPage}`);
+                })
+                .catch(error => {
+                    console.error('Infinite scroll error:', error);
+                    // Reset loading state on error
+                    loadingPage = null;
+                    isLoading = false;
+                    // Remove from processed pages on error
+                    processedPages.delete(nextPage);
+                })
+                .finally(() => {
+                    // Small delay before allowing next load
+                    setTimeout(() => {
+                        loadingPage = null;
+                        isLoading = false;
+                    }, 250); // Increased delay
+                });
         }
-    }, 25);
+    }, 400); // Increased debounce time
 
     characterListContainer.addEventListener('scroll', scrollHandler);
 
@@ -682,34 +749,68 @@ jQuery(async () => {
 });
 
 // Add new optimization for batch processing
+const filterDuplicateCharacters = (characters) => {
+    const seen = new Set();
+    return characters.filter(char => {
+        // Create a unique key using name and author
+        const key = `${char.name.toLowerCase()}-${char.author.toLowerCase()}`;
+        if (seen.has(key)) {
+            return false;
+        }
+        seen.add(key);
+        return true;
+    });
+};
+
+let seenCharacters = new Map(); // Changed to Map to store full character data
+
 const processCharacters = async (nodes) => {
-    const batchSize = 20; // Increased from 10
+    const batchSize = 20;
     const batches = [];
+    const processedCharacters = [];
+
+    // Split nodes into batches
     for (let i = 0; i < nodes.length; i += batchSize) {
         batches.push(nodes.slice(i, i + batchSize));
     }
 
-    const processedCharacters = [];
     for (const batch of batches) {
         const promises = batch.map(async (node) => {
-            const blob = await getCharacter(node.fullPath);
-            return {
-                url: URL.createObjectURL(blob),
-                description: node.tagline || "Description here...",
-                name: node.name,
-                fullPath: node.fullPath,
-                tags: node.topics,
-                author: node.fullPath.split('/')[0],
-            };
+            const key = `${node.name.toLowerCase()}-${node.fullPath.split('/')[0].toLowerCase()}`;
+            
+            // Skip if we've already seen this character
+            if (seenCharacters.has(key)) {
+                console.log(`Skipping duplicate character: ${node.name}`);
+                return null;
+            }
+
+            try {
+                const blob = await getCharacter(node.fullPath);
+                const character = {
+                    url: URL.createObjectURL(blob),
+                    description: node.tagline || "Description here...",
+                    name: node.name,
+                    fullPath: node.fullPath,
+                    tags: node.topics,
+                    author: node.fullPath.split('/')[0],
+                };
+                
+                seenCharacters.set(key, character);
+                return character;
+            } catch (error) {
+                console.error(`Failed to process character ${node.name}:`, error);
+                return null;
+            }
         });
+
         const results = await Promise.all(promises);
-        processedCharacters.push(...results);
+        const validResults = results.filter(result => result !== null);
         
-        // Update UI after each batch
-        if (characterListContainer) {
-            updateCharacterListInView(processedCharacters, true);
+        if (validResults.length > 0) {
+            processedCharacters.push(...validResults);
         }
     }
+
     return processedCharacters;
 };
 
